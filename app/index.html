@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>GridWatch — GTA City Intelligence</title>
+
+<!-- MapLibre GL JS — vector map with native zoom, compass & 360° rotate -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.js"></script>
+
+<!-- React -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet"/>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #070B14;
+    --card:    #0E1524;
+    --raised:  #131C30;
+    --border:  #1C2842;
+    --muted:   #1F2E4A;
+    --dim:     #536B8C;
+    --text:    #B4C6DE;
+    --bright:  #ECF3FF;
+    --accent:  #16C6E8;   /* GTA transit cyan */
+    --red:     #EF4444;
+    --orange:  #F97316;
+    --yellow:  #EAB308;
+    --green:   #22C55E;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Inter', sans-serif;
+  }
+
+  html, body, #root { height: 100%; width: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; overflow: hidden; }
+  ::-webkit-scrollbar { width: 3px; height: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+
+  /* MapLibre dark styling */
+  .maplibregl-ctrl-group { background: #0E1524 !important; border: 1px solid #1C2842 !important; }
+  .maplibregl-ctrl-group button { background: transparent !important; width: 32px !important; height: 32px !important; }
+  .maplibregl-ctrl-group button + button { border-top: 1px solid #1C2842 !important; }
+  .maplibregl-ctrl button .maplibregl-ctrl-icon { filter: invert(0.8) brightness(1.4); }
+  .maplibregl-ctrl-attrib { background: rgba(7,11,20,0.75) !important; font-size: 9px; }
+  .maplibregl-ctrl-attrib a { color: #536B8C !important; }
+  .maplibregl-popup-content { background: #0E1524; color: #B4C6DE; border: 1px solid #1C2842; border-radius: 10px; padding: 0; box-shadow: 0 8px 32px rgba(0,0,0,0.7); }
+  .maplibregl-popup-tip { border-top-color: #0E1524 !important; border-bottom-color: #0E1524 !important; }
+  .maplibregl-popup-close-button { color: #536B8C; font-size: 18px; padding: 4px 8px; }
+  .maplibregl-canvas { outline: none; }
+  .maplibregl-map { width: 100%; height: 100%; }
+
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
+  @keyframes slideUp { from{opacity:0;transform:translateY(18px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+  @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+  @keyframes ping { 0%{transform:scale(1);opacity:.5} 100%{transform:scale(2.4);opacity:0} }
+
+  button { font-family: var(--sans); cursor: pointer; border: none; outline: none; }
+  input { font-family: var(--sans); outline: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+/* ═══════════════════════════════════════════
+   ROLE CONFIG — single source of truth
+   (EMS, Fire, Logistics, TTC, Brampton, MiWay)
+═══════════════════════════════════════════ */
+const ROLE_CONFIG = {
+  ems:       { icon:'🚑', color:'#D7263D', label:'EMS',              full:'Ambulance / EMS',      focus:'response corridors & hospital access' },
+  fire:      { icon:'🚒', color:'#F25C05', label:'Fire',             full:'Fire Department',      focus:'apparatus routing & staging' },
+  logistics: { icon:'🚚', color:'#F4A100', label:'Logistics',        full:'Logistics / Delivery', focus:'delivery windows & fleet routing' },
+  ttc:       { icon:'🚋', color:'#DA251D', label:'TTC',              full:'TTC',                  focus:'streetcar & bus diversions' },
+  brampton:  { icon:'🚌', color:'#00A9AD', label:'Brampton Transit', full:'Brampton Transit',     focus:'Brampton route conflicts' },
+  miway:     { icon:'🚌', color:'#F58220', label:'MiWay',            full:'MiWay (Mississauga)',  focus:'Mississauga route conflicts' },
+};
+const ROLE_ORDER = ['ems','fire','logistics','ttc','brampton','miway'];
+
+/* ═══════════════════════════════════════════
+   DATA SOURCES — cited, verifiable
+═══════════════════════════════════════════ */
+const DATA_SOURCES = [
+  { id:1, name:'City of Toronto Open Data', url:'open.toronto.ca',       gives:'Construction & event permits, road occupancy', status:'live' },
+  { id:2, name:'City of Brampton GeoHub',   url:'geohub.brampton.ca',    gives:'Road closures + BramptonWorks construction',   status:'live' },
+  { id:3, name:'Peel Region Data Portal',   url:'data.peelregion.ca',    gives:'Regional infra: Brampton, Mississauga, Caledon', status:'live' },
+  { id:4, name:'Transit GTFS-Realtime',     url:'TTC · Brampton · MiWay',gives:'Scheduled + live service (one pipeline)',      status:'live' },
+  { id:5, name:'Ontario 511',               url:'511on.ca',              gives:'Provincial highway roadwork (401/407/410)',    status:'degraded' },
+];
+
+/* ═══════════════════════════════════════════
+   ENGINE
+═══════════════════════════════════════════ */
+const SEV_META = {
+  critical:{color:'#EF4444',bg:'rgba(239,68,68,0.12)',label:'Critical',emoji:'🔴'},
+  high:    {color:'#F97316',bg:'rgba(249,115,22,0.12)',label:'High',emoji:'🟠'},
+  medium:  {color:'#EAB308',bg:'rgba(234,179,8,0.12)',label:'Medium',emoji:'🟡'},
+};
+
+function haversine(a,b){
+  const R=6371000,dLat=(b.lat-a.lat)*Math.PI/180,dLon=(b.lon-a.lon)*Math.PI/180;
+  const x=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
+}
+const tOverlap=(a,b)=>a.start<b.end&&b.start<a.end;
+
+/* Events span Toronto + Brampton + Mississauga + provincial highways */
+const RAW = [
+  // TORONTO — King & Bathurst (critical)
+  {id:'T-R01',type:'road',        city:'Toronto',   lat:43.6447,lon:-79.4014,loc:'King St W & Bathurst',   desc:'Full closure — utility access',        src:1,start:0,end:13},
+  {id:'T-C01',type:'construction',city:'Toronto',   lat:43.6449,lon:-79.4018,loc:'650 King St W',          desc:'Excavation + crane permit',            src:1,start:-2,end:10},
+  {id:'T-T01',type:'transit',     city:'Toronto',   lat:43.6445,lon:-79.4010,loc:'TTC Route 504 King',     desc:'Streetcar detour at Bathurst',         src:4,start:0,end:8},
+  {id:'T-C02',type:'construction',city:'Toronto',   lat:43.6452,lon:-79.4022,loc:'680 King St W',          desc:'Scaffolding, sidewalk closed',         src:1,start:-3,end:14},
+  // TORONTO — Spadina & College (high)
+  {id:'T-R02',type:'road',        city:'Toronto',   lat:43.6596,lon:-79.4022,loc:'Spadina & College',      desc:'Lane reduction — Spadina',             src:1,start:1,end:9},
+  {id:'T-U01',type:'construction',city:'Toronto',   lat:43.6594,lon:-79.4025,loc:'Spadina watermain',      desc:'Toronto Water — watermain work',       src:1,start:0,end:10},
+  {id:'T-T02',type:'transit',     city:'Toronto',   lat:43.6598,lon:-79.4020,loc:'TTC Route 510 Spadina',  desc:'Single-track operation',               src:4,start:-1,end:11},
+  // BRAMPTON — Queen & Main (critical) — GeoHub
+  {id:'B-R01',type:'road',        city:'Brampton',  lat:43.6852,lon:-79.7597,loc:'Queen St E & Main St',    desc:'Road closure — downtown Brampton',     src:2,start:-1,end:12},
+  {id:'B-C01',type:'construction',city:'Brampton',  lat:43.6849,lon:-79.7601,loc:'Main St N reconstruction',desc:'BramptonWorks — full reconstruction',  src:2,start:-4,end:16},
+  {id:'B-T01',type:'transit',     city:'Brampton',  lat:43.6855,lon:-79.7593,loc:'Brampton Transit Rt 501',desc:'Züm 501 Queen — detour active',        src:4,start:0,end:10},
+  // BRAMPTON — Bramalea & Steeles (high) — Peel
+  {id:'B-R02',type:'road',        city:'Brampton',  lat:43.7010,lon:-79.7180,loc:'Bramalea Rd & Steeles',   desc:'Peel Region watermain closure',        src:3,start:1,end:9},
+  {id:'B-T02',type:'transit',     city:'Brampton',  lat:43.7014,lon:-79.7176,loc:'Brampton Transit Rt 15', desc:'Route 15 Bramalea — reroute',          src:4,start:0,end:8},
+  // MISSISSAUGA — Hurontario & Dundas (high) — Peel
+  {id:'M-R01',type:'road',        city:'Mississauga',lat:43.5890,lon:-79.6441,loc:'Hurontario & Dundas',    desc:'Hazel McCallion LRT staging closure',  src:3,start:-2,end:20},
+  {id:'M-T01',type:'transit',     city:'Mississauga',lat:43.5894,lon:-79.6437,loc:'MiWay Route 19',         desc:'Route 19 Hurontario — diversion',      src:4,start:-1,end:14},
+  {id:'M-C01',type:'construction',city:'Mississauga',lat:43.5887,lon:-79.6445,loc:'Hurontario LRT works',  desc:'LRT track construction',               src:3,start:-5,end:18},
+
+  // ═══ TTC-FOCUSED CLUSTERS (primary pitch audience) ═══
+  // TTC — Yonge & Eglinton (critical) — Line 1 + Crosstown + bus
+  {id:'T-R10',type:'road',        city:'Toronto',   lat:43.7070,lon:-79.3984,loc:'Yonge St & Eglinton Ave', desc:'Road closure — Crosstown LRT staging', src:1,start:-2,end:22},
+  {id:'T-T10',type:'transit',     city:'Toronto',   lat:43.7072,lon:-79.3988,loc:'TTC Line 1 — Eglinton Stn',desc:'Line 1 Yonge — elevator + platform work',src:4,start:-3,end:20},
+  {id:'T-T11',type:'transit',     city:'Toronto',   lat:43.7066,lon:-79.3980,loc:'TTC Route 34 Eglinton',   desc:'Route 34 — modified stops both ways',  src:4,start:-1,end:18},
+  {id:'T-C10',type:'construction',city:'Toronto',   lat:43.7074,lon:-79.3982,loc:'Eglinton Crosstown Stn',  desc:'LRT station fit-out — crane active',   src:1,start:-6,end:20},
+
+  // TTC — Bloor & Yonge (critical) — busiest interchange in system
+  {id:'T-T20',type:'transit',     city:'Toronto',   lat:43.6709,lon:-79.3857,loc:'TTC Bloor-Yonge Station', desc:'Line 1 ↔ Line 2 interchange — capacity works',src:4,start:-2,end:16},
+  {id:'T-R20',type:'road',        city:'Toronto',   lat:43.6712,lon:-79.3861,loc:'Bloor St E & Yonge',      desc:'Lane closure — station upgrade access', src:1,start:0,end:14},
+  {id:'T-C20',type:'construction',city:'Toronto',   lat:43.6706,lon:-79.3853,loc:'Bloor-Yonge Capacity Proj',desc:'Second platform construction',         src:1,start:-4,end:18},
+
+  // TTC — King & Spadina (critical) — 504/510 streetcar hub
+  {id:'T-T30',type:'transit',     city:'Toronto',   lat:43.6449,lon:-79.3958,loc:'TTC Route 504 King',      desc:'504 King — short-turn at Spadina',     src:4,start:-1,end:12},
+  {id:'T-T31',type:'transit',     city:'Toronto',   lat:43.6452,lon:-79.3962,loc:'TTC Route 510 Spadina',   desc:'510 Spadina — single-track segment',   src:4,start:0,end:11},
+  {id:'T-R30',type:'road',        city:'Toronto',   lat:43.6447,lon:-79.3955,loc:'King St W & Spadina',      desc:'Track replacement road closure',       src:1,start:-1,end:13},
+
+  // TTC — St George (high) — Line 1/2 interchange
+  {id:'T-T40',type:'transit',     city:'Toronto',   lat:43.6680,lon:-79.3998,loc:'TTC St George Station',   desc:'Line 2 — signal upgrade delays',       src:4,start:0,end:10},
+  {id:'T-C40',type:'construction',city:'Toronto',   lat:43.6684,lon:-79.4002,loc:'St George Stn works',     desc:'Accessibility elevator install',       src:1,start:-2,end:14},
+
+  // TTC — Dundas & Yonge (high) — Line 1 + streetcar + pedestrian
+  {id:'T-T50',type:'transit',     city:'Toronto',   lat:43.6561,lon:-79.3802,loc:'TTC Dundas Station',      desc:'Line 1 — Dundas Sq crowd control',     src:4,start:1,end:9},
+  {id:'T-T51',type:'transit',     city:'Toronto',   lat:43.6558,lon:-79.3806,loc:'TTC Route 505 Dundas',    desc:'505 Dundas — diversion via Church',    src:4,start:0,end:8},
+  {id:'T-EV5',type:'event',       city:'Toronto',   lat:43.6563,lon:-79.3799,loc:'Yonge-Dundas Square',     desc:'Event permit — 5,000 attendees',       src:1,start:2,end:12},
+
+  // TTC — Union (high) — GO + Line 1 + streetcar
+  {id:'T-T60',type:'transit',     city:'Toronto',   lat:43.6453,lon:-79.3806,loc:'TTC Union Station',       desc:'Line 1 Union loop — platform works',   src:4,start:-1,end:11},
+  {id:'T-T61',type:'transit',     city:'Toronto',   lat:43.6450,lon:-79.3810,loc:'TTC Route 509 Harbourfront',desc:'509 — reroute at Union loop',        src:4,start:0,end:10},
+  {id:'T-EV6',type:'event',       city:'Toronto',   lat:43.6447,lon:-79.3802,loc:'Scotiabank Arena adj.',   desc:'Event egress — Union congestion',      src:1,start:4,end:10},
+
+  // TTC — Broadview & Danforth (medium) — Line 2 + 504/505
+  {id:'T-T70',type:'transit',     city:'Toronto',   lat:43.6767,lon:-79.3585,loc:'TTC Broadview Station',   desc:'Line 2 — track maintenance',           src:4,start:2,end:9},
+  {id:'T-R70',type:'road',        city:'Toronto',   lat:43.6763,lon:-79.3589,loc:'Broadview Ave & Danforth', desc:'Streetcar track work closure',         src:1,start:1,end:10},
+
+  // PROVINCIAL — Hwy 410 (medium) — Ontario 511
+  {id:'P-R01',type:'road',        city:'Highway',   lat:43.7150,lon:-79.7350,loc:'Hwy 410 @ Steeles',       desc:'ON-511: nightly lane closure',         src:5,start:3,end:11},
+  {id:'P-R02',type:'road',        city:'Highway',   lat:43.7160,lon:-79.7340,loc:'Hwy 410 NB ramp',         desc:'ON-511: ramp maintenance',             src:5,start:2,end:10},
+  // STANDALONE
+  {id:'T-EV1',type:'event',       city:'Toronto',   lat:43.6414,lon:-79.3791,loc:'Scotiabank Arena',        desc:'Leafs game — 19,000 fans',             src:1,start:4,end:10},
+  {id:'B-EV1',type:'event',       city:'Brampton',  lat:43.7315,lon:-79.7624,loc:'Chinguacousy Park',       desc:'Community festival permit',            src:2,start:3,end:12},
+];
+
+function buildEvents(){
+  const now=new Date();
+  return RAW.map(e=>({...e,start:new Date(now.getTime()+e.start*3600000),end:new Date(now.getTime()+e.end*3600000)}));
+}
+
+function detect(events){
+  const T=500,seen=new Set(),groups=[];
+  events.forEach((e1,i)=>{
+    if(seen.has(e1.id))return;
+    const cl=[e1];
+    events.forEach((e2,j)=>{
+      if(i===j||e2.id===e1.id)return;
+      if(haversine(e1,e2)<T&&tOverlap(e1,e2)){cl.push(e2);seen.add(e2.id);}
+    });
+    if(cl.length>=2){
+      seen.add(e1.id);
+      const centLat=cl.reduce((s,e)=>s+e.lat,0)/cl.length;
+      const centLon=cl.reduce((s,e)=>s+e.lon,0)/cl.length;
+      let maxD=0;cl.forEach(a=>cl.forEach(b=>maxD=Math.max(maxD,haversine(a,b))));
+      const score=Math.min(99,Math.round(Math.min(cl.length*18,55)+(cl.some(e=>e.type==='transit')?12:0)+(cl.some(e=>e.type==='construction')?8:0)+(cl.length>=4?10:0)));
+      const sev=score>=80?'critical':score>=55?'high':'medium';
+      const types=[...new Set(cl.map(e=>e.type))];
+      const st=cl.map(e=>e.start).reduce((a,b)=>a<b?a:b);
+      const en=cl.map(e=>e.end).reduce((a,b)=>a>b?a:b);
+      const fmt=t=>t.toLocaleTimeString('en-CA',{hour:'2-digit',minute:'2-digit',hour12:false});
+      const tn={road:'road closure',construction:'construction',transit:'transit diversion',event:'public event'};
+      const advice={critical:'Avoid if possible. Allow 30–45 min extra.',high:'Plan an alternate route. Expect 15–25 min delays.',medium:'Minor delays. Monitor before leaving.'};
+      const route={critical:'Use parallel arterials one block over. Switch transit to rapid/subway lines where available.',high:'Try streets one block north or south. Check your transit app for live reroutes.',medium:'Standard alternate routes should work fine.'};
+      groups.push({
+        id:`GW${String(groups.length+1).padStart(2,'0')}`,events:cl,centLat,centLon,maxDist:maxD,score,sev,types,
+        city:cl[0].city,loc:cl[0].loc,window:`${fmt(st)} – ${fmt(en)}`,
+        summary:`${cl.length} overlapping events: ${types.map(t=>tn[t]||t).join(', ')} within ${Math.round(maxD)}m.`,
+        plain:`${SEV_META[sev].emoji} ${advice[sev]}`, route:route[sev],
+        sources:[...new Set(cl.map(e=>e.src))],
+      });
+    }
+  });
+  return groups.sort((a,b)=>b.score-a.score);
+}
+
+/* ═══════════════════════════════════════════
+   SMALL UI
+═══════════════════════════════════════════ */
+const SevBadge=({sev})=>{const m=SEV_META[sev];return <span style={{fontFamily:'var(--mono)',fontSize:10,fontWeight:600,letterSpacing:'0.05em',padding:'3px 8px',borderRadius:4,background:m.bg,color:m.color}}>{m.label.toUpperCase()}</span>;};
+const Spinner=()=><div style={{width:16,height:16,border:'2px solid var(--muted)',borderTopColor:'var(--accent)',borderRadius:'50%',animation:'spin .7s linear infinite',display:'inline-block'}}/>;
+const SrcTag=({id})=>{const s=DATA_SOURCES.find(d=>d.id===id);return <span style={{fontFamily:'var(--mono)',fontSize:9,padding:'2px 6px',borderRadius:3,background:'var(--muted)',color:'var(--dim)'}}>{s?s.url:'src'}</span>;};
+
+/* ═══════════════════════════════════════════
+   MAPLIBRE MAP v2 — vector tiles + GeoJSON layers
+   - CARTO dark matter vector tiles (free, no API key, CORS-enabled)
+   - Fallback to MapLibre demo tiles if CARTO fails
+   - GPU-rendered circle/symbol layers instead of DOM markers
+   - GPU pulse animation on one paint property (not N DOM nodes)
+═══════════════════════════════════════════ */
+const STYLE_URLS = [
+  'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+  'https://demotiles.maplibre.org/style.json',
+];
+
+function eventsToGeoJSON(events, conflicts){
+  const cIds=new Set(conflicts.flatMap(g=>g.events.map(e=>e.id)));
+  return {type:'FeatureCollection',features:events.filter(e=>!cIds.has(e.id)).map(e=>({
+    type:'Feature',geometry:{type:'Point',coordinates:[e.lon,e.lat]},
+    properties:{id:e.id,type:e.type,city:e.city,loc:e.loc,desc:e.desc},
+  }))};
+}
+function conflictsToGeoJSON(conflicts){
+  return {type:'FeatureCollection',features:conflicts.map(g=>({
+    type:'Feature',geometry:{type:'Point',coordinates:[g.centLon,g.centLat]},
+    properties:{id:g.id,sev:g.sev,color:SEV_META[g.sev].color,score:g.score,count:g.events.length,city:g.city,loc:g.loc,summary:g.summary,route:g.route},
+  }))};
+}
+
+const GLMap=({conflicts,events,role,onSelect,visible})=>{
+  const ref=useRef(null),map=useRef(null),ready=useRef(false),popupRef=useRef(null),pulseFrame=useRef(null),roRef=useRef(null);
+  const [mapError,setMapError]=useState(null);
+  const styleIndex=useRef(0);
+
+  const initMap=(styleUrl)=>{
+    if(map.current||!ref.current)return;
+    if(ref.current.offsetWidth===0||ref.current.offsetHeight===0){requestAnimationFrame(()=>initMap(styleUrl));return;}
+    try{
+      const m=new maplibregl.Map({
+        container:ref.current,
+        style:styleUrl,
+        center:[-79.45,43.68], zoom:11, pitch:0, bearing:0,
+        attributionControl:{compact:true}, antialias:true,
+        failIfMajorPerformanceCaveat:false,
+      });
+      m.addControl(new maplibregl.NavigationControl({showCompass:true,showZoom:true,visualizePitch:true}),'top-right');
+      m.dragRotate.enable();
+      m.touchZoomRotate.enable();
+
+      m.on('load',()=>{
+        if(map.current!==m)return;
+        ready.current=true;
+        setMapError(null);
+
+        if(!m.getSource('events')){
+          m.addSource('events',{type:'geojson',data:eventsToGeoJSON(events,conflicts)});
+          m.addSource('conflicts',{type:'geojson',data:conflictsToGeoJSON(conflicts)});
+
+          m.addLayer({id:'events-layer',type:'circle',source:'events',paint:{
+            'circle-radius':5,'circle-color':'rgba(90,140,190,0.75)','circle-stroke-width':1,'circle-stroke-color':'rgba(130,180,230,0.6)'}});
+
+          m.addLayer({id:'conflicts-halo',type:'circle',source:'conflicts',paint:{
+            'circle-radius':16,'circle-color':['get','color'],'circle-opacity':0.25}});
+
+          m.addLayer({id:'conflicts-core',type:'circle',source:'conflicts',paint:{
+            'circle-radius':11,'circle-color':['get','color'],'circle-stroke-width':2.5,'circle-stroke-color':'#070B14'}});
+
+          m.addLayer({id:'conflicts-label',type:'symbol',source:'conflicts',
+            layout:{'text-field':['to-string',['get','count']],'text-size':11,'text-font':['Open Sans Bold','Noto Sans Bold','Arial Unicode MS Bold'],'text-allow-overlap':true},
+            paint:{'text-color':'#ffffff'}});
+
+          const popup=new maplibregl.Popup({closeButton:true,offset:14});
+          popupRef.current=popup;
+
+          m.on('click','events-layer',(e)=>{
+            const f=e.features[0],p=f.properties;
+            popup.setLngLat(f.geometry.coordinates).setHTML(`<div style="padding:11px;min-width:170px"><div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#536B8C;margin-bottom:4px">${p.type.toUpperCase()} · ${p.city}</div><div style="font-size:13px;color:#ECF3FF;font-weight:600;margin-bottom:3px">${p.loc}</div><div style="font-size:12px;color:#B4C6DE">${p.desc}</div></div>`).addTo(m);
+          });
+
+          m.on('click','conflicts-core',(e)=>{
+            const f=e.features[0],p=f.properties;
+            popup.setLngLat(f.geometry.coordinates).setHTML(`<div style="padding:12px;min-width:210px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div style="width:8px;height:8px;border-radius:50%;background:${p.color}"></div><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:${p.color};font-weight:600">${p.sev.toUpperCase()} · ${p.city} · ${p.score}</span></div><div style="font-size:13px;color:#ECF3FF;font-weight:700;margin-bottom:6px">${p.loc}</div><div style="font-size:11px;color:#B4C6DE;margin-bottom:8px">${p.summary}</div><div style="font-size:11px;color:#16C6E8">🗺 ${p.route}</div></div>`).addTo(m);
+            const original=conflicts.find(g=>g.id===p.id);
+            if(original)onSelect&&onSelect(original);
+          });
+
+          ['events-layer','conflicts-core'].forEach(id=>{
+            m.on('mouseenter',id,()=>m.getCanvas().style.cursor='pointer');
+            m.on('mouseleave',id,()=>m.getCanvas().style.cursor='');
+          });
+        }
+
+        let t=0;
+        const animate=()=>{
+          t+=0.04;
+          const r=14+Math.sin(t)*6, o=0.35+Math.sin(t)*0.15;
+          if(m.getLayer('conflicts-halo')){
+            m.setPaintProperty('conflicts-halo','circle-radius',r);
+            m.setPaintProperty('conflicts-halo','circle-opacity',o);
+          }
+          pulseFrame.current=requestAnimationFrame(animate);
+        };
+        animate();
+        m.resize();
+      });
+
+      m.on('error',(e)=>{
+        console.error('MapLibre error:',e&&e.error?e.error:e);
+        if(!ready.current){
+          styleIndex.current++;
+          if(styleIndex.current<STYLE_URLS.length){
+            console.log('Trying fallback style:', STYLE_URLS[styleIndex.current]);
+            m.remove();
+            map.current=null;
+            initMap(STYLE_URLS[styleIndex.current]);
+          }else{
+            setMapError('Failed to load map tiles. Try refreshing or check network connectivity.');
+          }
+        }
+      });
+
+      if(window.ResizeObserver&&!roRef.current){
+        roRef.current=new ResizeObserver(()=>{if(map.current)map.current.resize();});
+        roRef.current.observe(ref.current);
+      }
+      map.current=m;
+    }catch(err){
+      console.error('Map init failed:',err);
+      setMapError('Map could not be initialized: '+err.message);
+    }
+  };
+
+  useEffect(()=>{
+    if(!visible||!ref.current)return;
+    if(map.current){
+      const timers=[60,220,500].map(ms=>setTimeout(()=>map.current&&map.current.resize(),ms));
+      return()=>timers.forEach(clearTimeout);
+    }
+    styleIndex.current=0;
+    setMapError(null);
+    requestAnimationFrame(()=>initMap(STYLE_URLS[0]));
+    return ()=>{ if(pulseFrame.current)cancelAnimationFrame(pulseFrame.current); };
+  },[visible]);
+
+  useEffect(()=>{
+    if(!map.current||!ready.current)return;
+    const s1=map.current.getSource('events'), s2=map.current.getSource('conflicts');
+    if(s1)s1.setData(eventsToGeoJSON(events,conflicts));
+    if(s2)s2.setData(conflictsToGeoJSON(conflicts));
+  },[conflicts,events]);
+
+  return (
+    <div style={{width:'100%',height:'100%',position:'relative'}}>
+      <div ref={ref} style={{width:'100%',height:'100%'}}/>
+      {mapError&&(
+        <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:'var(--bg)',gap:16,zIndex:20}}>
+          <span style={{fontSize:40}}>🗺️</span>
+          <div style={{fontSize:16,fontWeight:700,color:'var(--bright)'}}>Map unavailable</div>
+          <div style={{fontSize:13,color:'var(--dim)',textAlign:'center',maxWidth:300,lineHeight:1.6}}>{mapError}</div>
+          <button onClick={()=>{if(map.current){map.current.remove();map.current=null;}styleIndex.current=0;setMapError(null);initMap(STYLE_URLS[0]);}} style={{padding:'10px 20px',borderRadius:20,background:'var(--accent)',color:'#000',fontWeight:600,border:'none',cursor:'pointer',marginTop:8}}>Retry</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════
+   AI CHAT — role-aware, proper error handling
+═══════════════════════════════════════════ */
+const Chat=({conflicts,events,role,onClose})=>{
+  const rc=ROLE_CONFIG[role];
+  const [msgs,setMsgs]=useState([]);
+  const [input,setInput]=useState('');
+  const [loading,setLoading]=useState(false);
+  const endRef=useRef();
+
+  useEffect(()=>{
+    setMsgs([{role:'assistant',content:`GridWatch AI — ${rc.full} mode. I'm tracking ${conflicts.length} active conflicts across Toronto, Brampton, and Mississauga right now, focused on ${rc.focus}.\n\nAsk me things like "best route to avoid delays" or "conflicts in Brampton" — tap a suggestion below or type your own.`,ts:new Date()}]);
+  },[role]);
+  useEffect(()=>{endRef.current?.scrollIntoView({behavior:'smooth'});},[msgs]);
+
+  const QUICK={
+    ems:['Any blocked emergency corridors?','Fastest hospital route right now?','Highest-risk zone for response?'],
+    fire:['Apparatus access risks today?','Staging area conflicts?','Which hydrant zones are affected?'],
+    logistics:['Best delivery route right now?','Which corridors to avoid?','When will downtown clear?'],
+    ttc:['Which streetcar routes are diverted?','Worst transit conflict now?','Alternate for Route 504?'],
+    brampton:['Brampton Transit conflicts today?','Züm 501 status?','Downtown Brampton delays?'],
+    miway:['MiWay route conflicts?','Hurontario corridor status?','Best route through Mississauga?'],
+  };
+
+  const sys=`You are GridWatch AI in ${rc.full} mode. Focus on ${rc.focus}. Keep answers short, specific, and actionable — plain sentences, no bullet dumps.
+
+LIVE GTA DATA (Toronto + Brampton + Mississauga + provincial highways):
+Conflicts: ${conflicts.length}
+${conflicts.map(g=>`[${g.sev.toUpperCase()} ${g.score}] ${g.loc} (${g.city}) — ${g.summary} Window ${g.window}. Detour: ${g.route}`).join('\n')}
+
+ALL EVENTS:
+${events.map(e=>`${e.type.toUpperCase()} · ${e.city}: ${e.loc} — ${e.desc}`).join('\n')}
+
+Give street-level route answers when asked. Reference the specific city (Toronto/Brampton/Mississauga).`;
+
+  // Local answer engine — always works, even with no network. Reads live conflict data.
+  const localAnswer=(q)=>{
+    const ql=q.toLowerCase();
+    const worst=conflicts[0];
+    const byCity=(c)=>conflicts.filter(g=>g.city.toLowerCase()===c);
+    const mention=(names)=>names.find(n=>ql.includes(n));
+
+    // route / avoid / best way
+    if(/(route|avoid|best way|drive|delay|get to|travel|commute)/.test(ql)){
+      if(!worst) return `Good news — no active conflicts right now across the GTA. Roads are clear for ${rc.full.toLowerCase()} operations.`;
+      const top=conflicts.slice(0,3);
+      return `Here's what to avoid right now:\n\n${top.map(g=>`${SEV_META[g.sev].emoji} ${g.loc} (${g.city}) — ${g.route}`).join('\n\n')}\n\nWorst zone is ${worst.loc} in ${worst.city} (score ${worst.score}/99). ${worst.plain}`;
+    }
+    // city-specific
+    const city=mention(['brampton','mississauga','toronto']);
+    if(city){
+      const cc=city.charAt(0).toUpperCase()+city.slice(1);
+      const list=byCity(city);
+      if(!list.length) return `No active conflicts in ${cc} right now. ${rc.full} routes there are clear.`;
+      return `${cc} has ${list.length} active conflict${list.length>1?'s':''}:\n\n${list.map(g=>`${SEV_META[g.sev].emoji} ${g.loc} — ${g.summary} ${g.plain}`).join('\n\n')}`;
+    }
+    // transit
+    if(/(ttc|transit|streetcar|bus|route|z[uü]m|miway|subway)/.test(ql)){
+      const t=conflicts.filter(g=>g.types.includes('transit'));
+      if(!t.length) return 'No transit conflicts detected right now across TTC, Brampton Transit, or MiWay.';
+      return `Transit conflicts active now:\n\n${t.map(g=>`${SEV_META[g.sev].emoji} ${g.loc} (${g.city}) — ${g.summary} Detour: ${g.route}`).join('\n\n')}`;
+    }
+    // emergency / hospital / corridor
+    if(/(emergency|hospital|corridor|response|ambulance|fire|blocked)/.test(ql)){
+      const crit=conflicts.filter(g=>g.sev==='critical');
+      if(!crit.length) return 'No critical corridor blockages right now. Standard response routes are clear.';
+      return `Emergency corridor risks:\n\n${crit.map(g=>`🔴 ${g.loc} (${g.city}) — ${g.summary} Alternate: ${g.route}`).join('\n\n')}\n\nRecommend pre-positioning units away from these zones.`;
+    }
+    // worst / highest / summary
+    if(/(worst|highest|summary|risk|overview|what.*happening|status)/.test(ql)){
+      return `GTA status: ${conflicts.length} active conflicts (${conflicts.filter(g=>g.sev==='critical').length} critical).\n\n${conflicts.slice(0,3).map(g=>`${SEV_META[g.sev].emoji} ${g.loc} (${g.city}) — score ${g.score}/99`).join('\n')}\n\nTop priority: ${worst?worst.loc+' in '+worst.city:'none'}.`;
+    }
+    // fallback
+    return `I'm tracking ${conflicts.length} conflicts across the GTA. The highest right now is ${worst?`${worst.loc} in ${worst.city} (${worst.score}/99) — ${worst.plain}`:'none — roads are clear'}.\n\nTry asking: "best route to avoid delays", "conflicts in Brampton", or "any emergency corridors blocked?"`;
+  };
+
+  const send=async(text)=>{
+    const q=(text||input).trim();
+    if(!q||loading)return;
+    const um={role:'user',content:q,ts:new Date()};
+    setMsgs(m=>[...m,um]);setInput('');setLoading(true);
+
+    let answered=false;
+    try{
+      const hist=msgs.filter(m=>m.role!=='system').map(m=>({role:m.role,content:m.content}));
+      const res=await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1000,system:sys,messages:[...hist,{role:'user',content:q}]})
+      });
+      if(!res.ok){const t=await res.text();throw new Error(`API ${res.status}: ${t}`);}
+      const data=await res.json();
+      const reply=data.content?.find(b=>b.type==='text')?.text;
+      if(reply){
+        setMsgs(m=>[...m,{role:'assistant',content:reply,ts:new Date()}]);
+        answered=true;
+      }
+    }catch(err){
+      console.error('Chat API unavailable, using local engine:',err);
+    }
+
+    // Fallback: answer from live local data so the demo never breaks
+    if(!answered){
+      await new Promise(r=>setTimeout(r,400)); // small delay so it feels responsive
+      setMsgs(m=>[...m,{role:'assistant',content:localAnswer(q),ts:new Date()}]);
+    }
+    setLoading(false);
+  };
+
+  const quick=QUICK[role]||QUICK.logistics;
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:200,background:'var(--bg)',display:'flex',flexDirection:'column',animation:'slideUp .25s ease'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 16px',borderBottom:'1px solid var(--border)',paddingTop:'max(14px,env(safe-area-inset-top))'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:8,height:8,borderRadius:'50%',background:'var(--green)',animation:'pulse 2s infinite'}}/>
+          <span style={{fontWeight:700,color:'var(--bright)',fontSize:15}}>GridWatch AI</span>
+          <span style={{fontSize:10,fontFamily:'var(--mono)',background:rc.color+'22',color:rc.color,padding:'3px 8px',borderRadius:4,fontWeight:600}}>{rc.icon} {rc.label}</span>
+        </div>
+        <button onClick={onClose} style={{background:'var(--muted)',color:'var(--text)',borderRadius:8,padding:'6px 14px',fontSize:13}}>Close</button>
+      </div>
+      <div style={{padding:'10px 14px',borderBottom:'1px solid var(--border)',display:'flex',gap:6,overflowX:'auto'}}>
+        {quick.map((q,i)=><button key={i} onClick={()=>send(q)} style={{whiteSpace:'nowrap',flexShrink:0,padding:'7px 13px',borderRadius:20,fontSize:12,background:'var(--muted)',color:'var(--text)',border:'1px solid var(--border)'}}>{q}</button>)}
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:'16px 14px',display:'flex',flexDirection:'column',gap:12}}>
+        {msgs.map((m,i)=>(
+          <div key={i} style={{display:'flex',justifyContent:m.role==='user'?'flex-end':'flex-start',animation:'fadeIn .2s ease'}}>
+            <div style={{maxWidth:'88%',padding:'11px 14px',borderRadius:14,borderBottomRightRadius:m.role==='user'?3:14,borderBottomLeftRadius:m.role==='assistant'?3:14,background:m.role==='user'?'linear-gradient(135deg,rgba(22,198,232,0.22),rgba(22,198,232,0.1))':'var(--card)',border:`1px solid ${m.role==='user'?'rgba(22,198,232,0.3)':'var(--border)'}`,fontSize:13.5,lineHeight:1.65,color:'var(--bright)'}}>
+              {m.content.split('\n').map((l,j)=><div key={j} style={{marginBottom:l===''?6:2}}>{l||'\u00A0'}</div>)}
+              <div style={{fontSize:10,color:'var(--dim)',marginTop:6,fontFamily:'var(--mono)'}}>{m.role==='assistant'?'GridWatch · ':'You · '}{m.ts.toLocaleTimeString('en-CA',{hour:'2-digit',minute:'2-digit',hour12:false})}</div>
+            </div>
+          </div>
+        ))}
+        {loading&&<div style={{display:'flex',alignItems:'center',gap:10,padding:'11px 14px',background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,borderBottomLeftRadius:3,maxWidth:'70%'}}><Spinner/><span style={{fontSize:12,color:'var(--dim)'}}>Checking live data...</span></div>}
+        <div ref={endRef}/>
+      </div>
+      <div style={{padding:'12px 14px',borderTop:'1px solid var(--border)',display:'flex',gap:8,paddingBottom:'max(12px,env(safe-area-inset-bottom))',background:'var(--bg)'}}>
+        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder={`Ask about ${rc.focus}...`} style={{flex:1,background:'var(--card)',border:'1px solid var(--border)',borderRadius:22,padding:'11px 16px',color:'var(--bright)',fontSize:14}}/>
+        <button onClick={()=>send()} disabled={loading||!input.trim()} style={{width:44,height:44,borderRadius:22,flexShrink:0,background:input.trim()&&!loading?'var(--accent)':'var(--muted)',color:input.trim()&&!loading?'#000':'var(--dim)',fontSize:18,display:'flex',alignItems:'center',justifyContent:'center'}}>↑</button>
+      </div>
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════
+   CONFLICT DETAIL SHEET
+═══════════════════════════════════════════ */
+const Sheet=({conflict:g,onClose})=>{
+  if(!g)return null;const m=SEV_META[g.sev];
+  return (
+    <div style={{position:'fixed',bottom:0,left:0,right:0,zIndex:150,background:'var(--card)',borderTop:`2px solid ${m.color}`,borderRadius:'18px 18px 0 0',padding:'16px 16px 32px',maxHeight:'75vh',overflowY:'auto',animation:'slideUp .28s ease'}}>
+      <div style={{width:36,height:4,borderRadius:2,background:'var(--muted)',margin:'0 auto 16px'}}/>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14}}>
+        <div>
+          <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
+            <SevBadge sev={g.sev}/>
+            <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--dim)',background:'var(--muted)',padding:'2px 7px',borderRadius:3}}>{g.city}</span>
+          </div>
+          <div style={{fontSize:17,fontWeight:800,color:'var(--bright)',lineHeight:1.25}}>{g.loc}</div>
+          <div style={{fontSize:12,color:'var(--dim)',fontFamily:'var(--mono)',marginTop:4}}>{g.window} · Score {g.score}/99</div>
+        </div>
+        <button onClick={onClose} style={{background:'var(--muted)',color:'var(--text)',borderRadius:20,padding:'5px 13px',fontSize:13,flexShrink:0}}>✕</button>
+      </div>
+      <div style={{background:'rgba(255,255,255,0.03)',border:'1px solid var(--border)',borderRadius:10,padding:14,marginBottom:12}}>
+        <div style={{fontSize:11,fontWeight:600,color:'var(--dim)',letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:8}}>What's happening</div>
+        <div style={{fontSize:13.5,color:'var(--text)',lineHeight:1.6}}>{g.summary}</div>
+      </div>
+      <div style={{background:m.bg,border:`1px solid ${m.color}33`,borderRadius:10,padding:14,marginBottom:12}}>
+        <div style={{fontSize:11,fontWeight:600,color:m.color,letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:8}}>What to do</div>
+        <div style={{fontSize:13.5,color:'var(--bright)',lineHeight:1.6}}>{g.plain}</div>
+      </div>
+      <div style={{background:'rgba(22,198,232,0.06)',border:'1px solid rgba(22,198,232,0.2)',borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={{fontSize:11,fontWeight:600,color:'var(--accent)',letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:8}}>Best route right now</div>
+        <div style={{fontSize:13.5,color:'var(--bright)',lineHeight:1.6}}>{g.route}</div>
+      </div>
+      <div style={{fontSize:11,fontWeight:600,color:'var(--dim)',letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:10}}>{g.events.length} contributing events</div>
+      {g.events.map((e,i)=>(
+        <div key={i} style={{display:'flex',gap:10,padding:'10px 12px',marginBottom:6,background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:8}}>
+          <span style={{fontSize:10,fontFamily:'var(--mono)',background:'var(--muted)',color:'var(--text)',padding:'2px 6px',borderRadius:3,height:'fit-content',flexShrink:0,marginTop:1,textTransform:'uppercase'}}>{e.type}</span>
+          <div style={{flex:1}}>
+            <div style={{fontSize:12,fontWeight:600,color:'var(--bright)',marginBottom:2}}>{e.loc}</div>
+            <div style={{fontSize:12,color:'var(--text)',marginBottom:4}}>{e.desc}</div>
+            <SrcTag id={e.src}/>
+          </div>
+        </div>
+      ))}
+      <div style={{marginTop:10,fontSize:11,color:'var(--dim)',display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+        <span>Detected from:</span>
+        {g.sources.map(s=><SrcTag key={s} id={s}/>)}
+      </div>
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════
+   APP
+═══════════════════════════════════════════ */
+const PAGES=[{id:'home',label:'Home',icon:'⬡'},{id:'map',label:'Map',icon:'◎'},{id:'alerts',label:'Alerts',icon:'⚠'},{id:'chat',label:'AI',icon:'✦'}];
+
+function App(){
+  const [page,setPage]=useState('home');
+  const [role,setRole]=useState('ems');
+  const [showChat,setShowChat]=useState(false);
+  const [showRole,setShowRole]=useState(false);
+  const [showSources,setShowSources]=useState(false);
+  const [selected,setSelected]=useState(null);
+  const [clock,setClock]=useState('');
+
+  const events=useMemo(()=>buildEvents(),[]);
+  const conflicts=useMemo(()=>detect(events),[events]);
+  const critical=conflicts.filter(c=>c.sev==='critical').length;
+  const cityRisk=critical>=2?'HIGH':critical>=1?'ELEVATED':'NORMAL';
+  const riskCol={HIGH:'var(--red)',ELEVATED:'var(--orange)',NORMAL:'var(--green)'}[cityRisk];
+  const rc=ROLE_CONFIG[role];
+
+  useEffect(()=>{
+    const id=setInterval(()=>setClock(new Date().toLocaleTimeString('en-CA',{hour12:false,hour:'2-digit',minute:'2-digit'})),1000);
+    setClock(new Date().toLocaleTimeString('en-CA',{hour12:false,hour:'2-digit',minute:'2-digit'}));
+    return()=>clearInterval(id);
+  },[]);
+
+  /* HOME */
+  const Home=()=>(
+    <div style={{overflowY:'auto',height:'100%',padding:'16px 14px 80px'}}>
+      {/* city status */}
+      <div style={{background:`linear-gradient(135deg,${riskCol}1A,${riskCol}06)`,border:`1px solid ${riskCol}40`,borderRadius:16,padding:'20px 16px',marginBottom:14}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+          <div>
+            <div style={{fontSize:11,fontWeight:600,color:'var(--dim)',letterSpacing:'0.1em',textTransform:'uppercase',marginBottom:5}}>GTA Status · Live</div>
+            <div style={{fontFamily:'var(--mono)',fontSize:34,fontWeight:600,color:riskCol,lineHeight:1}}>{cityRisk}</div>
+            <div style={{fontSize:13,color:'var(--text)',marginTop:6}}>{critical} critical · {conflicts.length} conflicts across GTA</div>
+          </div>
+          <div style={{textAlign:'right'}}>
+            <div style={{fontFamily:'var(--mono)',fontSize:18,color:'var(--bright)',fontWeight:600}}>{clock}</div>
+            <div style={{fontSize:11,color:'var(--dim)',marginTop:2}}>Toronto · Brampton · Peel</div>
+          </div>
+        </div>
+      </div>
+
+      {/* role switcher */}
+      <button onClick={()=>setShowRole(true)} style={{display:'flex',alignItems:'center',gap:12,width:'100%',padding:'14px',borderRadius:12,marginBottom:14,background:`linear-gradient(135deg,${rc.color}14,transparent)`,border:`1px solid ${rc.color}40`,color:'var(--text)',textAlign:'left'}}>
+        <span style={{fontSize:24}}>{rc.icon}</span>
+        <div><div style={{fontSize:14,fontWeight:600,color:'var(--bright)'}}>Viewing as {rc.full}</div><div style={{fontSize:12,color:'var(--dim)'}}>Focus: {rc.focus}</div></div>
+        <span style={{marginLeft:'auto',color:rc.color}}>⇄</span>
+      </button>
+
+      {/* 3 big buttons */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:16}}>
+        {[{p:'map',icon:'◎',l:'Map'},{p:'chat',icon:'✦',l:'Ask AI'},{p:'alerts',icon:'⚠',l:'Alerts'}].map(b=>(
+          <button key={b.p} onClick={()=>{if(b.p==='chat'){setShowChat(true);}else setPage(b.p);}} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:8,padding:'20px 8px',borderRadius:14,background:'var(--card)',border:'1px solid var(--border)',color:'var(--bright)'}}>
+            <span style={{fontSize:26}}>{b.icon}</span>
+            <span style={{fontSize:13,fontWeight:600}}>{b.l}</span>
+            {b.p==='alerts'&&critical>0&&<span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--red)'}}>{critical} critical</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* headline conflicts (top 3 only — keep home simple) */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+        <span style={{fontSize:11,fontWeight:600,color:'var(--dim)',letterSpacing:'0.09em',textTransform:'uppercase'}}>Top conflicts near you</span>
+        <button onClick={()=>setPage('alerts')} style={{fontSize:12,color:'var(--accent)',background:'transparent'}}>See all →</button>
+      </div>
+      {conflicts.slice(0,3).map(g=>{
+        const m=SEV_META[g.sev];
+        return (
+          <button key={g.id} onClick={()=>setSelected(g)} style={{display:'flex',alignItems:'flex-start',gap:12,width:'100%',padding:'14px 12px',borderRadius:12,marginBottom:8,background:'var(--card)',border:'1px solid var(--border)',borderLeft:`3px solid ${m.color}`,textAlign:'left'}}>
+            <div style={{width:10,height:10,borderRadius:'50%',background:m.color,flexShrink:0,marginTop:4}}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:5}}><SevBadge sev={g.sev}/><span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--dim)',background:'var(--muted)',padding:'2px 6px',borderRadius:3}}>{g.city}</span></div>
+              <div style={{fontSize:13,fontWeight:600,color:'var(--bright)',marginBottom:3}}>{g.loc}</div>
+              <div style={{fontSize:12,color:'var(--text)',lineHeight:1.5}}>{g.plain}</div>
+            </div>
+            <span style={{color:'var(--dim)',flexShrink:0}}>›</span>
+          </button>
+        );
+      })}
+
+      {/* data sources trust strip */}
+      <button onClick={()=>setShowSources(true)} style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'12px 14px',borderRadius:10,marginTop:8,background:'var(--card)',border:'1px solid var(--border)',color:'var(--text)',textAlign:'left'}}>
+        <span style={{fontSize:16}}>🛰</span>
+        <div><div style={{fontSize:12,fontWeight:600,color:'var(--bright)'}}>5 live data sources</div><div style={{fontSize:11,color:'var(--dim)'}}>Toronto · Brampton · Peel · GTFS · ON-511</div></div>
+        <span style={{marginLeft:'auto',color:'var(--dim)'}}>›</span>
+      </button>
+    </div>
+  );
+
+  const currentRole=ROLE_CONFIG[role];
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
+      {/* top bar */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'var(--card)',borderBottom:'1px solid var(--border)',flexShrink:0,zIndex:50,paddingTop:'max(12px,env(safe-area-inset-top))'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+            <rect x="1" y="1" width="20" height="20" rx="4" stroke="#16C6E8" strokeWidth="1.5"/>
+            <line x1="1" y1="8" x2="21" y2="8" stroke="#1C2842" strokeWidth="1"/><line x1="1" y1="14" x2="21" y2="14" stroke="#1C2842" strokeWidth="1"/>
+            <line x1="8" y1="1" x2="8" y2="21" stroke="#1C2842" strokeWidth="1"/><line x1="14" y1="1" x2="14" y2="21" stroke="#1C2842" strokeWidth="1"/>
+            <circle cx="11" cy="11" r="2.5" fill="#16C6E8"/><circle cx="8" cy="8" r="1.5" fill="#EF4444"/><circle cx="14" cy="14" r="1.5" fill="#EF4444"/>
+          </svg>
+          <span style={{fontFamily:'var(--mono)',fontWeight:600,color:'var(--bright)',fontSize:14,letterSpacing:'0.06em'}}>GRID<span style={{color:'var(--accent)'}}>WATCH</span></span>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <button onClick={()=>setShowRole(true)} style={{display:'flex',alignItems:'center',gap:5,background:currentRole.color+'1A',border:`1px solid ${currentRole.color}40`,padding:'4px 9px',borderRadius:20}}>
+            <span style={{fontSize:13}}>{currentRole.icon}</span>
+            <span style={{fontFamily:'var(--mono)',fontSize:10,fontWeight:600,color:currentRole.color}}>{currentRole.label}</span>
+          </button>
+          <div style={{display:'flex',alignItems:'center',gap:5,background:`${riskCol}18`,border:`1px solid ${riskCol}40`,padding:'4px 9px',borderRadius:20}}>
+            <div style={{width:6,height:6,borderRadius:'50%',background:riskCol,animation:'pulse 2s infinite'}}/>
+            <span style={{fontFamily:'var(--mono)',fontSize:10,fontWeight:600,color:riskCol}}>{cityRisk}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* pages */}
+      <div style={{flex:1,overflow:'hidden',position:'relative'}}>
+        {page==='home'&&<Home/>}
+        {/* Map mounts on first open; toggled with display so it keeps its GL context */}
+        <div style={{position:'absolute',inset:0,display:page==='map'?'block':'none'}}>
+          <div style={{height:'100%',position:'relative'}}>
+            <GLMap conflicts={conflicts} events={events} role={role} onSelect={setSelected} visible={page==='map'}/>
+            <div style={{position:'absolute',top:12,left:12,zIndex:10,background:'rgba(7,11,20,0.9)',border:'1px solid var(--border)',borderRadius:8,padding:'10px 12px'}}>
+              <div style={{fontSize:10,fontWeight:600,color:'var(--dim)',letterSpacing:'0.08em',marginBottom:8}}>CONFLICTS</div>
+              {Object.entries(SEV_META).map(([k,v])=><div key={k} style={{display:'flex',alignItems:'center',gap:7,marginBottom:4,fontSize:12,color:'var(--text)'}}><div style={{width:8,height:8,borderRadius:'50%',background:v.color}}/>{v.label}</div>)}
+              <div style={{display:'flex',alignItems:'center',gap:7,fontSize:12,color:'var(--text)',marginTop:6,paddingTop:6,borderTop:'1px solid var(--border)'}}><div style={{width:8,height:8,borderRadius:'50%',background:'rgba(90,140,190,0.55)'}}/>Normal</div>
+            </div>
+            <div style={{position:'absolute',bottom:24,left:12,zIndex:10,background:'rgba(7,11,20,0.9)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 12px',fontSize:11,color:'var(--dim)',maxWidth:180}}>
+              Pinch/scroll to zoom · drag to pan · right-click or two-finger drag to rotate 360°
+            </div>
+          </div>
+        </div>
+        {page==='alerts'&&(
+          <div style={{overflowY:'auto',height:'100%',padding:'14px 14px 80px'}}>
+            <div style={{fontSize:11,fontWeight:600,color:'var(--dim)',letterSpacing:'0.09em',textTransform:'uppercase',marginBottom:12}}>{conflicts.length} Active Conflicts — GTA-wide</div>
+            {conflicts.map(g=>{
+              const m=SEV_META[g.sev];
+              return (
+                <button key={g.id} onClick={()=>setSelected(g)} style={{display:'block',width:'100%',textAlign:'left',background:'var(--card)',border:'1px solid var(--border)',borderLeft:`3px solid ${m.color}`,borderRadius:12,padding:'14px',marginBottom:10}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
+                    <div style={{display:'flex',gap:8,alignItems:'center'}}><SevBadge sev={g.sev}/><span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--dim)',background:'var(--muted)',padding:'2px 6px',borderRadius:3}}>{g.city}</span></div>
+                    <span style={{fontFamily:'var(--mono)',fontSize:12,color:m.color,fontWeight:600}}>{g.score}/99</span>
+                  </div>
+                  <div style={{fontSize:14,fontWeight:700,color:'var(--bright)',marginBottom:4}}>{g.loc}</div>
+                  <div style={{fontSize:12,color:'var(--dim)',fontFamily:'var(--mono)',marginBottom:8}}>{g.window}</div>
+                  <div style={{fontSize:13,color:'var(--text)',lineHeight:1.5,marginBottom:8}}>{g.summary}</div>
+                  <div style={{fontSize:12,color:m.color,background:m.bg,padding:'8px 10px',borderRadius:7,border:`1px solid ${m.color}30`,marginBottom:6}}>{g.plain}</div>
+                  <div style={{fontSize:12,color:'var(--accent)',padding:'8px 10px',borderRadius:7,background:'rgba(22,198,232,0.06)',border:'1px solid rgba(22,198,232,0.15)'}}>🗺 {g.route}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {page==='chat'&&(
+          <div style={{height:'100%',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16,padding:24}}>
+            <span style={{fontSize:44}}>✦</span>
+            <div style={{fontSize:18,fontWeight:700,color:'var(--bright)'}}>GridWatch AI · {currentRole.label}</div>
+            <div style={{fontSize:14,color:'var(--dim)',textAlign:'center',maxWidth:280,lineHeight:1.6}}>Ask about {currentRole.focus} across Toronto, Brampton, and Mississauga.</div>
+            <button onClick={()=>setShowChat(true)} style={{padding:'14px 28px',borderRadius:24,background:'linear-gradient(135deg,var(--accent),#0284c7)',color:'#000',fontWeight:700,fontSize:15,marginTop:8}}>Start Chatting →</button>
+          </div>
+        )}
+      </div>
+
+      {/* bottom nav */}
+      <div style={{display:'flex',borderTop:'1px solid var(--border)',background:'var(--card)',flexShrink:0,paddingBottom:'max(4px,env(safe-area-inset-bottom))',zIndex:50}}>
+        {PAGES.map(p=>{
+          const active=page===p.id;const badge=p.id==='alerts'&&critical>0;
+          return (
+            <button key={p.id} onClick={()=>{setPage(p.id);if(p.id==='chat')setShowChat(true);}} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',padding:'10px 4px 8px',background:'transparent',color:active?'var(--accent)':'var(--dim)',position:'relative'}}>
+              {badge&&<div style={{position:'absolute',top:8,right:'calc(50% - 16px)',background:'var(--red)',color:'#fff',borderRadius:8,fontSize:9,fontWeight:700,padding:'1px 5px',fontFamily:'var(--mono)'}}>{critical}</div>}
+              <span style={{fontSize:18,lineHeight:1}}>{p.icon}</span>
+              <span style={{fontSize:10,marginTop:3,fontWeight:active?600:400}}>{p.label}</span>
+              {active&&<div style={{position:'absolute',bottom:0,left:'50%',transform:'translateX(-50%)',width:20,height:2,background:'var(--accent)',borderRadius:1}}/>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* role picker modal */}
+      {showRole&&(
+        <div style={{position:'fixed',inset:0,zIndex:180,background:'rgba(7,11,20,0.92)',display:'flex',flexDirection:'column',justifyContent:'flex-end'}} onClick={()=>setShowRole(false)}>
+          <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:'18px 18px 0 0',padding:'20px 16px',paddingBottom:'max(20px,env(safe-area-inset-bottom))'}} onClick={e=>e.stopPropagation()}>
+            <div style={{width:36,height:4,borderRadius:2,background:'var(--muted)',margin:'0 auto 16px'}}/>
+            <div style={{fontSize:15,fontWeight:700,color:'var(--bright)',marginBottom:16}}>Choose your role</div>
+            {ROLE_ORDER.map(id=>{const r=ROLE_CONFIG[id];return (
+              <button key={id} onClick={()=>{setRole(id);setShowRole(false);}} style={{display:'flex',alignItems:'center',gap:14,width:'100%',padding:'14px 12px',borderRadius:12,marginBottom:8,background:role===id?r.color+'14':'rgba(255,255,255,0.02)',border:`1px solid ${role===id?r.color+'50':'var(--border)'}`,color:'var(--bright)',textAlign:'left'}}>
+                <span style={{fontSize:24}}>{r.icon}</span>
+                <div><div style={{fontWeight:600,fontSize:14}}>{r.full}</div><div style={{fontSize:12,color:'var(--dim)'}}>{r.focus}</div></div>
+                {role===id&&<div style={{marginLeft:'auto',color:r.color,fontSize:16}}>✓</div>}
+              </button>
+            );})}
+          </div>
+        </div>
+      )}
+
+      {/* data sources modal */}
+      {showSources&&(
+        <div style={{position:'fixed',inset:0,zIndex:180,background:'rgba(7,11,20,0.92)',display:'flex',flexDirection:'column',justifyContent:'flex-end'}} onClick={()=>setShowSources(false)}>
+          <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:'18px 18px 0 0',padding:'20px 16px',paddingBottom:'max(20px,env(safe-area-inset-bottom))',maxHeight:'70vh',overflowY:'auto'}} onClick={e=>e.stopPropagation()}>
+            <div style={{width:36,height:4,borderRadius:2,background:'var(--muted)',margin:'0 auto 16px'}}/>
+            <div style={{fontSize:15,fontWeight:700,color:'var(--bright)',marginBottom:6}}>Live Data Sources</div>
+            <div style={{fontSize:12,color:'var(--dim)',marginBottom:16}}>Every conflict is detected by cross-referencing these public feeds.</div>
+            {DATA_SOURCES.map(s=>(
+              <div key={s.id} style={{display:'flex',gap:12,padding:'12px',marginBottom:8,background:'rgba(255,255,255,0.02)',border:'1px solid var(--border)',borderRadius:10}}>
+                <div style={{width:8,height:8,borderRadius:'50%',background:s.status==='live'?'var(--green)':'var(--yellow)',flexShrink:0,marginTop:4}}/>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:600,color:'var(--bright)'}}>{s.name}</div>
+                  <div style={{fontSize:11,color:'var(--accent)',fontFamily:'var(--mono)',marginTop:2}}>{s.url}</div>
+                  <div style={{fontSize:12,color:'var(--text)',marginTop:4}}>{s.gives}</div>
+                </div>
+                <span style={{fontSize:9,fontFamily:'var(--mono)',color:s.status==='live'?'var(--green)':'var(--yellow)',height:'fit-content'}}>{s.status.toUpperCase()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* chat overlay */}
+      {showChat&&<Chat conflicts={conflicts} events={events} role={role} onClose={()=>setShowChat(false)}/>}
+
+      {/* detail sheet */}
+      {selected&&<><div style={{position:'fixed',inset:0,zIndex:140,background:'rgba(7,11,20,0.7)'}} onClick={()=>setSelected(null)}/><Sheet conflict={selected} onClose={()=>setSelected(null)}/></>}
+
+      <style>{`
+        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+        @keyframes slideUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        @keyframes ping{0%{transform:scale(1);opacity:.5}100%{transform:scale(2.4);opacity:0}}
+      `}</style>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

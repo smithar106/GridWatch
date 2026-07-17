@@ -1,0 +1,30 @@
+flowchart TD
+    A["GridWatch Core Engine<br/>4 Toronto data sources + conflict detection"]
+
+    A --> B1["Pain: Where is my cargo?"]
+    A --> B2["Pain: Route blocked, no backup plan"]
+    A --> B3["Pain: Unknown road/infra conditions"]
+    A --> B4["Pain: Cargo issue mid-route"]
+
+    B1 --> C1["Fix: Location tied to conflict layer, not just a GPS dot"]
+    B2 --> C2["Fix: Predictive reroute suggestion before blockage hits"]
+    B3 --> C3["Fix: Live construction/utility/transit conflict feed"]
+    B4 --> C4["Fix: Telemetry partner integration (Phase 2)"]
+
+    C1 --> D1["Outcome: Fewer 'where's my truck' calls"]
+    C2 --> D2["Outcome: On-time delivery improves"]
+    C3 --> D3["Outcome: Fewer surprise delays"]
+    C4 --> D4["Outcome: Faster issue response"]
+
+    D1 --> E["Revenue Streams"]
+    D2 --> E
+    D3 --> E
+    D4 --> E
+
+    E --> F1["Per-fleet SaaS subscription"]
+    E --> F2["TMS/ERP integration & API fee"]
+    E --> F3["Enterprise control tower license"]
+    E --> F4["Agentic sandbox premium tier (Phase 2)"]
+
+    style A fill:#1a73e8,color:#fff
+    style E fill:#188038,color:#fff

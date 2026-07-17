@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>MapLibre Isolation Test</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.js"></script>
+<style>
+  body { margin: 0; background: #070B14; display: flex; flex-direction: column; height: 100vh; font-family: system-ui, sans-serif; }
+  #map { flex: 1; }
+  .controls { padding: 12px 16px; background: #0E1524; border-top: 1px solid #1C2842; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; color: #B4C6DE; }
+  button { padding: 8px 16px; border-radius: 8px; border: 1px solid #1C2842; background: #131C30; color: #ECF3FF; cursor: pointer; font-size: 13px; }
+  button:hover { background: #1C2842; }
+  .status { font-size: 12px; font-family: monospace; }
+  .pass { color: #22C55E; }
+  .fail { color: #EF4444; }
+  .info { color: #536B8C; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="controls">
+  <span class="status" id="status">Initializing...</span>
+  <button onclick="switchStyle('https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json')">CARTO Dark</button>
+  <button onclick="switchStyle('https://demotiles.maplibre.org/style.json')">MapLibre Demo</button>
+  <button onclick="switchStyle('https://tiles.openfreemap.org/styles/liberty')">OpenFreeMap</button>
+</div>
+
+<script>
+  const statusEl = document.getElementById('status');
+  let map = null;
+
+  function switchStyle(url) {
+    if (map) {
+      statusEl.textContent = 'Switching to: ' + url;
+      statusEl.className = 'status info';
+      map.setStyle(url);
+    } else {
+      initMap(url);
+    }
+  }
+
+  function initMap(styleUrl) {
+    if (map) { map.remove(); map = null; }
+
+    statusEl.textContent = 'Loading: ' + styleUrl;
+    statusEl.className = 'status info';
+
+    try {
+      map = new maplibregl.Map({
+        container: 'map',
+        style: styleUrl,
+        center: [-79.45, 43.68],
+        zoom: 11,
+        attributionControl: { compact: true },
+      });
+
+      map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+      map.on('load', () => {
+        statusEl.textContent = '✅ Map loaded successfully — ' + styleUrl;
+        statusEl.className = 'status pass';
+        map.resize();
+
+        map.addSource('test-point', {
+          type: 'geojson',
+          data: {
+            type: 'FeatureCollection',
+            features: [
+              { type: 'Feature', geometry: { type: 'Point', coordinates: [-79.45, 43.68] }, properties: { label: 'GTA Center' } },
+              { type: 'Feature', geometry: { type: 'Point', coordinates: [-79.40, 43.65] }, properties: { label: 'Toronto' } },
+              { type: 'Feature', geometry: { type: 'Point', coordinates: [-79.76, 43.68] }, properties: { label: 'Brampton' } },
+            ]
+          }
+        });
+
+        map.addLayer({
+          id: 'test-points',
+          type: 'circle',
+          source: 'test-point',
+          paint: {
+            'circle-radius': 8,
+            'circle-color': '#16C6E8',
+            'circle-stroke-width': 2,
+            'circle-stroke-color': '#070B14',
+          }
+        });
+      });
+
+      map.on('error', (e) => {
+        statusEl.textContent = '❌ Map error: ' + (e.error ? e.error.message : 'unknown');
+        statusEl.className = 'status fail';
+        console.error('Map error:', e);
+      });
+
+      map.on('style.load', () => {
+        console.log('Style loaded:', styleUrl);
+      });
+
+    } catch (err) {
+      statusEl.textContent = '❌ Init failed: ' + err.message;
+      statusEl.className = 'status fail';
+    }
+  }
+
+  initMap('https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json');
+</script>
+</body>
+</html>

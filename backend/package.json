@@ -1,0 +1,20 @@
+{
+  "name": "gridwatch-backend",
+  "version": "4.0.0",
+  "description": "GridWatch multi-source ingestion backend — TTC GTFS-RT, Ontario 511, Environment Canada, and mock fallback data.",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "gtfs-realtime-bindings": "^1.1.0",
+    "node-fetch": "^2.7.0",
+    "dotenv": "^16.3.1"
+  }
+}
